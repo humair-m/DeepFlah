@@ -323,7 +323,8 @@ class DataPipe:
                     if not torch.allclose(noisy, clean, atol=1e-5):
                         noise += 1
                     
-                    yield clean, a16
+                    # Return clean (target), low-res input, and noisy version
+                    yield clean, a16, noisy
                     cnt += 1
                 
                 if (idx+1) % 10 == 0:
@@ -337,15 +338,20 @@ class DataPipe:
     
     def loader(self, bs):
         gen = self.gen()
-        b48, b16 = [], []
+        b48, b16, b48_noisy = [], [], []
         
-        for s48, s16 in gen:
+        for s48, s16, s48_noisy in gen:
             b48.append(s48)
             b16.append(s16)
+            b48_noisy.append(s48_noisy)
             
             if len(b48) == bs:
-                yield {'a48': torch.stack(b48), 'a16': torch.stack(b16)}
-                b48, b16 = [], []
+                yield {
+                    'a48': torch.stack(b48),
+                    'a16': torch.stack(b16),
+                    'a48_noisy': torch.stack(b48_noisy)
+                }
+                b48, b16, b48_noisy = [], [], []
 
 # ============================================================================
 # TRAINER
@@ -368,16 +374,23 @@ class Trainer:
         if self.cfg.compare:
             try:
                 from IPython.display import display, Audio, HTML
-                get_ipython()  # Raises if not in notebook
-                self.in_notebook = True
-                self.IPython = type('IPython', (), {
-                    'display': display,
-                    'Audio': Audio,
-                    'HTML': HTML
-                })
-                print("✓ Audio comparison enabled")
-            except:
-                print("⚠️  --compare requires Jupyter notebook")
+                from IPython import get_ipython
+                
+                # Check if running in IPython/Jupyter
+                ipython = get_ipython()
+                if ipython is not None:
+                    self.in_notebook = True
+                    self.IPython = type('IPython', (), {
+                        'display': display,
+                        'Audio': Audio,
+                        'HTML': HTML
+                    })
+                    print("✓ Audio comparison enabled")
+                else:
+                    print("⚠️  --compare requires Jupyter notebook")
+                    self.cfg.compare = False
+            except Exception as e:
+                print(f"⚠️  --compare requires Jupyter notebook (error: {e})")
                 self.cfg.compare = False
     
     def _model(self):
@@ -424,16 +437,16 @@ class Trainer:
         self.data = DataPipe(self.cfg)
         print("="*80)
     
-    def _display_comparison(self, input_16k, predicted, original, bidx):
+    def _display_comparison(self, input_16k, predicted, original, noisy, bidx):
         """Display audio comparison in notebook"""
         if not self.cfg.compare or not self.in_notebook:
             return
         
         try:
-            # Take first sample from batch
-            inp = input_16k[0].cpu().numpy()
-            pred = predicted[0].cpu().numpy()
-            orig = original[0].cpu().numpy()
+            # Take first sample from batch and detach from graph
+            inp = input_16k[0].detach().cpu().numpy()
+            pred = predicted[0].detach().cpu().numpy()
+            orig = original[0].detach().cpu().numpy()
             
             # Create HTML display
             html = f"""
@@ -444,16 +457,24 @@ class Trainer:
             
             self.IPython.display(self.IPython.HTML(html))
             
+            # Show noisy audio if in denoise mode and noise was added
+            if self.cfg.add_noise and noisy is not None:
+                noisy_np = noisy[0].detach().cpu().numpy()
+                # Check if actually noisy (different from original)
+                if not torch.allclose(noisy[0].detach(), original[0].detach(), atol=1e-5):
+                    print("  🔊 Noisy (48kHz - with added noise):")
+                    self.IPython.display(self.IPython.Audio(noisy_np, rate=self.cfg.sr_high))
+            
             # Input (16kHz)
-            print("  📥 Input (16kHz):")
+            print("  📥 Input (16kHz - downsampled):")
             self.IPython.display(self.IPython.Audio(inp, rate=self.cfg.sr_low))
             
             # Predicted (48kHz)
-            print("  🤖 Predicted (48kHz):")
+            print("  🤖 Predicted (48kHz - model output):")
             self.IPython.display(self.IPython.Audio(pred, rate=self.cfg.sr_high))
             
             # Original (48kHz)
-            print("  ✨ Original (48kHz):")
+            print("  ✨ Original (48kHz - ground truth):")
             self.IPython.display(self.IPython.Audio(orig, rate=self.cfg.sr_high))
             
             html_end = "</div></div>"
@@ -462,7 +483,7 @@ class Trainer:
         except Exception as e:
             print(f"⚠️  Display error: {e}")
     
-    def step(self, a48, a16):
+    def step(self, a48, a16, a48_noisy=None):
         self.opt.zero_grad()
         
         a16 = a16.cuda().unsqueeze(1)
@@ -502,6 +523,7 @@ class Trainer:
             for bidx, batch in enumerate(loader):
                 a48 = batch['a48'].cuda()
                 a16 = batch['a16']
+                a48_noisy = batch['a48_noisy']
                 
                 tot, stft, phase, l, pred = self.step(a48, a16)
                 
@@ -516,7 +538,7 @@ class Trainer:
                     print(f"  LSD: {l:.4f} {st} | LR: {lr:.6f}")
                     
                     # Display audio comparison if enabled
-                    self._display_comparison(a16, pred, a48, bidx)
+                    self._display_comparison(a16, pred, a48, a48_noisy, bidx)
             
             avg = eloss / max(bcnt, 1)
             print(f"\n📈 Epoch {ep+1} Avg: {avg:.4f}")
