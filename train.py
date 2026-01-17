@@ -11,8 +11,8 @@ Examples:
     # Train upsample-only model
     python train_novasr.py --mode upsample
     
-    # Custom settings
-    python train_novasr.py --epochs 20 --batch-size 4 --lr 1e-5
+    # Custom settings with audio comparison
+    python train_novasr.py --epochs 20 --batch-size 4 --lr 1e-5 --compare
 """
 
 import argparse
@@ -101,6 +101,7 @@ class Config:
     
     # Logging
     log_interval: int = 50
+    compare: bool = False  # Display audio comparison
     
     # Audio
     sr_high: int = 48000
@@ -357,6 +358,27 @@ class Trainer:
         self._losses()
         self._optim()
         self._data()
+        self._setup_display()
+    
+    def _setup_display(self):
+        """Setup audio display for notebooks"""
+        self.in_notebook = False
+        self.IPython = None
+        
+        if self.cfg.compare:
+            try:
+                from IPython.display import display, Audio, HTML
+                get_ipython()  # Raises if not in notebook
+                self.in_notebook = True
+                self.IPython = type('IPython', (), {
+                    'display': display,
+                    'Audio': Audio,
+                    'HTML': HTML
+                })
+                print("✓ Audio comparison enabled")
+            except:
+                print("⚠️  --compare requires Jupyter notebook")
+                self.cfg.compare = False
     
     def _model(self):
         print("\n🤖 Model...")
@@ -402,6 +424,44 @@ class Trainer:
         self.data = DataPipe(self.cfg)
         print("="*80)
     
+    def _display_comparison(self, input_16k, predicted, original, bidx):
+        """Display audio comparison in notebook"""
+        if not self.cfg.compare or not self.in_notebook:
+            return
+        
+        try:
+            # Take first sample from batch
+            inp = input_16k[0].cpu().numpy()
+            pred = predicted[0].cpu().numpy()
+            orig = original[0].cpu().numpy()
+            
+            # Create HTML display
+            html = f"""
+            <div style='background:#f5f5f5; padding:15px; border-radius:8px; margin:10px 0'>
+                <h4 style='margin:0 0 10px 0; color:#333'>🔊 Audio Comparison - Batch {bidx}</h4>
+                <div style='display:grid; gap:10px'>
+            """
+            
+            self.IPython.display(self.IPython.HTML(html))
+            
+            # Input (16kHz)
+            print("  📥 Input (16kHz):")
+            self.IPython.display(self.IPython.Audio(inp, rate=self.cfg.sr_low))
+            
+            # Predicted (48kHz)
+            print("  🤖 Predicted (48kHz):")
+            self.IPython.display(self.IPython.Audio(pred, rate=self.cfg.sr_high))
+            
+            # Original (48kHz)
+            print("  ✨ Original (48kHz):")
+            self.IPython.display(self.IPython.Audio(orig, rate=self.cfg.sr_high))
+            
+            html_end = "</div></div>"
+            self.IPython.display(self.IPython.HTML(html_end))
+            
+        except Exception as e:
+            print(f"⚠️  Display error: {e}")
+    
     def step(self, a48, a16):
         self.opt.zero_grad()
         
@@ -424,7 +484,7 @@ class Trainer:
         self.opt.step()
         self.sch.step()
         
-        return tot.item(), stft.item(), phase.item(), l.item()
+        return tot.item(), stft.item(), phase.item(), l.item(), pred
     
     def train(self):
         print("\n" + "="*80)
@@ -443,7 +503,7 @@ class Trainer:
                 a48 = batch['a48'].cuda()
                 a16 = batch['a16']
                 
-                tot, stft, phase, l = self.step(a48, a16)
+                tot, stft, phase, l, pred = self.step(a48, a16)
                 
                 eloss += tot
                 bcnt += 1
@@ -454,6 +514,9 @@ class Trainer:
                     print(f"\n📊 Batch {bidx}")
                     print(f"  Tot: {tot:.4f} | STFT: {stft:.4f} | Phase: {phase:.4f}")
                     print(f"  LSD: {l:.4f} {st} | LR: {lr:.6f}")
+                    
+                    # Display audio comparison if enabled
+                    self._display_comparison(a16, pred, a48, bidx)
             
             avg = eloss / max(bcnt, 1)
             print(f"\n📈 Epoch {ep+1} Avg: {avg:.4f}")
@@ -497,6 +560,7 @@ def parse_args():
     p.add_argument('--batch-size', type=int, default=8)
     p.add_argument('--lr', type=float, default=1e-5)
     p.add_argument('--from-scratch', action='store_true')
+    p.add_argument('--compare', action='store_true', help='Display audio comparison in notebook')
     return p.parse_args()
 
 def main():
@@ -509,13 +573,16 @@ def main():
     print(f"📊 Epochs: {args.epochs}")
     print(f"📦 Batch: {args.batch_size}")
     print(f"📈 LR: {args.lr}")
+    if args.compare:
+        print(f"🔊 Audio comparison: Enabled")
     
     cfg = Config(
         mode=args.mode,
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
-        from_scratch=args.from_scratch
+        from_scratch=args.from_scratch,
+        compare=args.compare
     )
     
     trainer = Trainer(cfg)
