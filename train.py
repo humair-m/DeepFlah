@@ -460,8 +460,10 @@ class Trainer:
             # Show noisy audio if in denoise mode and noise was added
             if self.cfg.add_noise and noisy is not None:
                 noisy_np = noisy[0].detach().cpu().numpy()
-                # Check if actually noisy (different from original)
-                if not torch.allclose(noisy[0].detach(), original[0].detach(), atol=1e-5):
+                # Check if actually noisy (different from original) - both on CPU
+                noisy_cpu = noisy[0].detach().cpu()
+                orig_cpu = original[0].detach().cpu()
+                if not torch.allclose(noisy_cpu, orig_cpu, atol=1e-5):
                     print("  🔊 Noisy (48kHz - with added noise):")
                     self.IPython.display(self.IPython.Audio(noisy_np, rate=self.cfg.sr_high))
             
