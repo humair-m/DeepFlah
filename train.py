@@ -11,6 +11,9 @@ Examples:
     # Train upsample-only model
     python train_novasr.py --mode upsample
     
+    # Start from custom pretrained model
+    python train_novasr.py --model my_model.bin --epochs 5
+    
     # Custom settings with audio comparison
     python train_novasr.py --epochs 20 --batch-size 4 --lr 1e-5 --compare
 """
@@ -71,6 +74,10 @@ class Config:
     # Mode
     mode: str = 'denoise'  # 'denoise' or 'upsample'
     
+    # Model
+    model_path: Optional[str] = None  # Custom pretrained model path
+    from_scratch: bool = False
+    
     # Dataset
     dataset: str = 'ai4bharat/Rasa'
     dataset_config: str = 'Urdu'
@@ -83,7 +90,6 @@ class Config:
     noise_prob: float = 0.7
     
     # Training
-    from_scratch: bool = False
     batch_size: int = 8
     lr: float = 1e-5
     epochs: int = 10
@@ -400,7 +406,23 @@ class Trainer:
         tot = sum(p.numel() for p in self.m.model.parameters())
         print(f"✓ {tot:,} params ({tot*2/1024:.1f} KB)")
         
-        if self.cfg.from_scratch:
+        # Load custom model if specified
+        if self.cfg.model_path:
+            model_path = Path(self.cfg.model_path)
+            if not model_path.exists():
+                print(f"❌ Error: Model file not found: {self.cfg.model_path}")
+                sys.exit(1)
+            
+            try:
+                print(f"📥 Loading custom model: {self.cfg.model_path}")
+                state_dict = torch.load(self.cfg.model_path, map_location='cpu')
+                self.m.model.load_state_dict(state_dict, strict=True)
+                print(f"✓ Loaded pretrained weights from {self.cfg.model_path}")
+            except Exception as e:
+                print(f"❌ Error loading model: {e}")
+                sys.exit(1)
+        
+        elif self.cfg.from_scratch:
             print("⚠️  Random init...")
             def rst(m):
                 if hasattr(m, 'reset_parameters'):
@@ -410,7 +432,7 @@ class Trainer:
             self.m.model.apply(rst)
             print("✓ Random weights")
         else:
-            print("✓ Pre-trained (fine-tune)")
+            print("✓ Using default pretrained weights")
         
         self.m.model.train().cuda().float()
     
@@ -579,12 +601,20 @@ class Trainer:
 
 def parse_args():
     p = argparse.ArgumentParser(description='Train NovaSR')
-    p.add_argument('--mode', choices=['denoise','upsample'], default='denoise')
-    p.add_argument('--epochs', type=int, default=10)
-    p.add_argument('--batch-size', type=int, default=8)
-    p.add_argument('--lr', type=float, default=1e-5)
-    p.add_argument('--from-scratch', action='store_true')
-    p.add_argument('--compare', action='store_true', help='Display audio comparison in notebook')
+    p.add_argument('--mode', choices=['denoise','upsample'], default='denoise',
+                   help='Training mode: denoise (with noise) or upsample (clean only)')
+    p.add_argument('--model', type=str, default=None,
+                   help='Path to custom pretrained model (.bin file)')
+    p.add_argument('--epochs', type=int, default=10,
+                   help='Number of training epochs')
+    p.add_argument('--batch-size', type=int, default=8,
+                   help='Batch size for training')
+    p.add_argument('--lr', type=float, default=1e-5,
+                   help='Learning rate')
+    p.add_argument('--from-scratch', action='store_true',
+                   help='Train from random initialization (ignored if --model is specified)')
+    p.add_argument('--compare', action='store_true',
+                   help='Display audio comparison in notebook')
     return p.parse_args()
 
 def main():
@@ -594,6 +624,12 @@ def main():
     print("NOVASR TRAINING")
     print("="*80)
     print(f"\n🎯 Mode: {args.mode.upper()}")
+    if args.model:
+        print(f"📦 Custom Model: {args.model}")
+    elif args.from_scratch:
+        print(f"🎲 Training: From scratch (random init)")
+    else:
+        print(f"📦 Training: Fine-tuning default pretrained model")
     print(f"📊 Epochs: {args.epochs}")
     print(f"📦 Batch: {args.batch_size}")
     print(f"📈 LR: {args.lr}")
@@ -602,10 +638,11 @@ def main():
     
     cfg = Config(
         mode=args.mode,
+        model_path=args.model,
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
-        from_scratch=args.from_scratch,
+        from_scratch=args.from_scratch and not args.model,  # Ignore from_scratch if model is specified
         compare=args.compare
     )
     
